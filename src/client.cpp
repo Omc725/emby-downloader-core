@@ -324,7 +324,7 @@ std::vector<MediaItem> EmbyClient::searchByName(const std::string& query) {
     // 1. Direct search
     std::string url1 = m_serverUrl + m_prefix + "/Users/" + m_userId + 
                        "/Items?SearchTerm=" + Platform::urlEncode(query) + 
-                       "&IncludeItemTypes=Movie,Series&Recursive=true&api_key=" + Platform::urlEncode(m_token);
+                       "&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=" + Platform::urlEncode(m_token);
     HttpResponse res1 = httpGet(url1, getHeaders());
     if (res1.isOk()) {
         try {
@@ -346,7 +346,7 @@ std::vector<MediaItem> EmbyClient::searchByName(const std::string& query) {
     if (!cleanedTitle.empty() && Platform::toLower(cleanedTitle) != Platform::toLower(query)) {
         std::string url2 = m_serverUrl + m_prefix + "/Users/" + m_userId + 
                            "/Items?SearchTerm=" + Platform::urlEncode(cleanedTitle) + 
-                           "&IncludeItemTypes=Movie,Series&Recursive=true&api_key=" + Platform::urlEncode(m_token);
+                           "&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=" + Platform::urlEncode(m_token);
         HttpResponse res2 = httpGet(url2, getHeaders());
         if (res2.isOk()) {
             try {
@@ -368,7 +368,7 @@ std::vector<MediaItem> EmbyClient::searchByName(const std::string& query) {
     if (results.empty()) {
         std::string url3 = m_serverUrl + m_prefix + "/Users/" + m_userId + 
                            "/Items?SearchTerm=" + Platform::urlEncode(query) + 
-                           "&Recursive=true&Limit=10&api_key=" + Platform::urlEncode(m_token);
+                           "&Recursive=true&Limit=10&Fields=MediaSources&api_key=" + Platform::urlEncode(m_token);
         HttpResponse res3 = httpGet(url3, getHeaders());
         if (res3.isOk()) {
             try {
@@ -476,7 +476,7 @@ std::vector<MediaItem> EmbyClient::searchById(const std::string& idInput) {
     for (const auto& q : providerQueries) {
         std::string url = m_serverUrl + m_prefix + "/Users/" + m_userId + 
                           "/Items?AnyProviderIdEquals=" + Platform::urlEncode(q) + 
-                          "&IncludeItemTypes=Movie,Series&Recursive=true&api_key=" + Platform::urlEncode(m_token);
+                          "&IncludeItemTypes=Movie,Series&Recursive=true&Fields=MediaSources&api_key=" + Platform::urlEncode(m_token);
         HttpResponse res = httpGet(url, getHeaders());
         if (res.isOk()) {
             try {
