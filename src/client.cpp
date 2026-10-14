@@ -579,8 +579,25 @@ std::string EmbyClient::buildDirectVideoUrl(const std::string& itemId, const Med
 }
 
 std::string EmbyClient::buildDirectAudioStreamUrl(const std::string& itemId, const MediaSource& source, const StreamInfo& audioStream) const {
-    return m_serverUrl + m_prefix + "/Audio/" + itemId + "/stream.mka?AudioStreamIndex=" + std::to_string(audioStream.index) + 
+    std::string ext = Platform::getAudioExtension(audioStream.codec);
+    if (ext == "m4a") ext = "aac";
+    if (ext.empty()) ext = "mka";
+    return m_serverUrl + m_prefix + "/Audio/" + itemId + "/stream." + ext + "?AudioStreamIndex=" + std::to_string(audioStream.index) + 
            "&MediaSourceId=" + Platform::urlEncode(source.id) + "&api_key=" + Platform::urlEncode(m_token);
+}
+
+uint64_t EmbyClient::getAudioContentLength(const std::string& itemId, const MediaSource& source, const StreamInfo& audioStream) const {
+    std::string url = buildDirectAudioStreamUrl(itemId, source, audioStream);
+    HttpResponse res = const_cast<EmbyClient*>(this)->httpHead(url, getHeaders());
+    if (res.isOk()) {
+        auto it = res.headers.find("content-length");
+        if (it != res.headers.end()) {
+            try {
+                return std::stoull(it->second);
+            } catch (...) {}
+        }
+    }
+    return 0;
 }
 
 std::string EmbyClient::getSubtitleUrl(const std::string& itemId, const std::string& sourceId, int subIndex, const std::string& ext) const {

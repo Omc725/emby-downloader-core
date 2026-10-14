@@ -266,6 +266,14 @@ std::string EmbyEngine::enqueueAudio(
     task.streamIndex = audioStream.index;
     task.streamCodec = audioStream.codec;
     task.streamLanguage = lang;
+    task.streamBitrate = audioStream.bitRate;
+
+    if (audioStream.bitRate > 0 && item.durationSeconds > 0) {
+        task.expectedSize = static_cast<uint64_t>(std::round((audioStream.bitRate / 8.0) * item.durationSeconds));
+    }
+    if (task.expectedSize == 0 && m_client) {
+        task.expectedSize = m_client->getAudioContentLength(item.id, source, audioStream);
+    }
 
     return m_queue->addTask(task);
 }

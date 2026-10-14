@@ -26,6 +26,7 @@ enum class TaskType {
 enum class TaskStatus {
     Pending,
     Downloading,
+    Paused,
     Completed,
     Error,
     Cancelled
@@ -117,6 +118,7 @@ struct QueueTask {
     int streamIndex = 0;
     std::string streamCodec;
     std::string streamLanguage;
+    int streamBitrate = 0;
     TaskStatus status = TaskStatus::Pending;
     ProgressInfo progress;
     std::string error;

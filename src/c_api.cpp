@@ -300,6 +300,7 @@ char* emby_engine_queue_add_audio(
         stream.index = stj.value("index", 0);
         stream.codec = stj.value("codec", "");
         stream.language = stj.value("language", "");
+        stream.bitRate = stj.value("bitRate", 0);
 
         std::string dir = output_dir ? output_dir : "";
         std::string id = engine->engine->enqueueAudio(item, source, stream, dir);

@@ -35,6 +35,7 @@ public:
     QueueTask getTask(const std::string& taskId) const;
     size_t getPendingCount() const;
     bool isRunning() const;
+    bool isPaused() const;
 
     void start();
     void pause();

@@ -1,4 +1,5 @@
 #include "emby/downloader.hpp"
+#include "emby/audio_extractor.hpp"
 #include "emby/platform.hpp"
 
 #include <curl/curl.h>
@@ -7,6 +8,13 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <cmath>
+
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -21,11 +29,30 @@ struct CurlDownloadContext {
     ProgressCallback progressCallback;
     CancellationToken cancellationToken;
     bool aborted = false;
+    bool checkedRange = false;
+    CURL* curlHandle = nullptr;
 };
 
 static size_t writeFileCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-    FILE* f = static_cast<FILE*>(userp);
-    return std::fwrite(contents, size, nmemb, f);
+    CurlDownloadContext* ctx = static_cast<CurlDownloadContext*>(userp);
+    if (!ctx || !ctx->file) return 0;
+
+    if (!ctx->checkedRange && ctx->curlHandle) {
+        ctx->checkedRange = true;
+        long httpCode = 0;
+        curl_easy_getinfo(ctx->curlHandle, CURLINFO_RESPONSE_CODE, &httpCode);
+        if (httpCode == 200 && ctx->resumeOffset > 0) {
+            std::fseek(ctx->file, 0, SEEK_SET);
+#if defined(_WIN32)
+            _chsize_s(_fileno(ctx->file), 0);
+#else
+            if (ftruncate(fileno(ctx->file), 0) != 0) {}
+#endif
+            ctx->resumeOffset = 0;
+        }
+    }
+
+    return std::fwrite(contents, size, nmemb, ctx->file);
 }
 
 static int xferInfoCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t /*ultotal*/, curl_off_t /*ulnow*/) {
@@ -143,11 +170,13 @@ DownloadResult Downloader::downloadFile(
         ctx.progressCallback = progressCb;
         ctx.cancellationToken = cancellationToken;
         ctx.aborted = false;
+        ctx.checkedRange = false;
+        ctx.curlHandle = curl;
 
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, chunk);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeFileCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, fp);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -229,6 +258,45 @@ DownloadResult Downloader::downloadVideo(
     std::string downloadUrl = m_client.buildDirectVideoUrl(itemId, source);
     uint64_t targetSize = (expectedSize > 0) ? expectedSize : source.size;
     return downloadFile(downloadUrl, outputPath, targetSize, progressCb, cancellationToken);
+}
+
+DownloadResult Downloader::downloadAudio(
+    const std::string& itemId,
+    const MediaSource& source,
+    const StreamInfo& audioStream,
+    const std::string& outputPath,
+    uint64_t expectedSize,
+    double durationSeconds,
+    ProgressCallback progressCb,
+    CancellationToken cancellationToken
+) {
+    uint64_t targetSize = expectedSize;
+    if (targetSize == 0 && audioStream.bitRate > 0 && durationSeconds > 0) {
+        targetSize = static_cast<uint64_t>(std::round((audioStream.bitRate / 8.0) * durationSeconds));
+    }
+    if (targetSize == 0) {
+        targetSize = m_client.getAudioContentLength(itemId, source, audioStream);
+    }
+
+    std::string directUrl = m_client.buildDirectAudioStreamUrl(itemId, source, audioStream);
+
+    // İlk deneme: libcurl ile doğrudan ses akışını indir
+    DownloadResult res = downloadFile(directUrl, outputPath, targetSize, progressCb, cancellationToken, 2);
+    if (res.success || (cancellationToken && cancellationToken->load())) {
+        return res;
+    }
+
+    // Yedek çözüm: doğrudan akış başarısız olduysa AudioExtractor (ffmpeg) kullan
+    std::string fallbackVideoUrl = m_client.buildDirectVideoUrl(itemId, source);
+    return AudioExtractor::extractAudioStream(
+        directUrl,
+        fallbackVideoUrl,
+        audioStream,
+        outputPath,
+        durationSeconds,
+        progressCb,
+        cancellationToken
+    );
 }
 
 DownloadResult Downloader::downloadSubtitle(

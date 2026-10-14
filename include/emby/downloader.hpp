@@ -21,6 +21,17 @@ public:
         CancellationToken cancellationToken = nullptr
     );
 
+    DownloadResult downloadAudio(
+        const std::string& itemId,
+        const MediaSource& source,
+        const StreamInfo& audioStream,
+        const std::string& outputPath,
+        uint64_t expectedSize = 0,
+        double durationSeconds = 0.0,
+        ProgressCallback progressCb = nullptr,
+        CancellationToken cancellationToken = nullptr
+    );
+
     DownloadResult downloadSubtitle(
         const std::string& itemId,
         const std::string& sourceId,

@@ -49,6 +49,7 @@ public:
 
     std::string buildDirectVideoUrl(const std::string& itemId, const MediaSource& source) const;
     std::string buildDirectAudioStreamUrl(const std::string& itemId, const MediaSource& source, const StreamInfo& audioStream) const;
+    uint64_t getAudioContentLength(const std::string& itemId, const MediaSource& source, const StreamInfo& audioStream) const;
     std::string getSubtitleUrl(const std::string& itemId, const std::string& sourceId, int subIndex, const std::string& ext) const;
     std::string getOfficialDownloadUrl(const std::string& itemId) const;
     bool checkOfficialDownloadAvailable(const std::string& itemId);

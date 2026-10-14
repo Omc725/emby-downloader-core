@@ -30,6 +30,7 @@ static std::string taskStatusToString(TaskStatus status) {
     switch (status) {
         case TaskStatus::Pending: return "pending";
         case TaskStatus::Downloading: return "downloading";
+        case TaskStatus::Paused: return "paused";
         case TaskStatus::Completed: return "completed";
         case TaskStatus::Error: return "error";
         case TaskStatus::Cancelled: return "cancelled";
@@ -40,6 +41,7 @@ static std::string taskStatusToString(TaskStatus status) {
 static TaskStatus taskStatusFromString(const std::string& str) {
     if (str == "pending") return TaskStatus::Pending;
     if (str == "downloading") return TaskStatus::Downloading;
+    if (str == "paused") return TaskStatus::Paused;
     if (str == "completed") return TaskStatus::Completed;
     if (str == "error") return TaskStatus::Error;
     if (str == "cancelled") return TaskStatus::Cancelled;
@@ -60,6 +62,7 @@ static nlohmann::json taskToJson(const QueueTask& task) {
     j["streamIndex"] = task.streamIndex;
     j["streamCodec"] = task.streamCodec;
     j["streamLanguage"] = task.streamLanguage;
+    j["streamBitrate"] = task.streamBitrate;
     j["status"] = taskStatusToString(task.status);
     j["error"] = task.error;
     return j;
@@ -79,8 +82,19 @@ static QueueTask jsonToTask(const nlohmann::json& j) {
     t.streamIndex = j.value("streamIndex", 0);
     t.streamCodec = j.value("streamCodec", "");
     t.streamLanguage = j.value("streamLanguage", "");
+    t.streamBitrate = j.value("streamBitrate", 0);
     t.status = taskStatusFromString(j.value("status", "pending"));
     t.error = j.value("error", "");
+
+    std::string partPath = t.outputPath + ".part";
+    std::error_code ec;
+    if (fs::exists(partPath, ec)) {
+        t.progress.currentBytes = fs::file_size(partPath, ec);
+        t.progress.totalBytes = t.expectedSize;
+        if (t.expectedSize > 0) {
+            t.progress.percent = std::min(100.0, (static_cast<double>(t.progress.currentBytes) / static_cast<double>(t.expectedSize)) * 100.0);
+        }
+    }
     return t;
 }
 
@@ -195,9 +209,20 @@ bool QueueManager::isRunning() const {
     return m_isRunning.load();
 }
 
+bool QueueManager::isPaused() const {
+    return m_isPaused.load();
+}
+
 void QueueManager::start() {
+    m_isPaused.store(false);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& t : m_tasks) {
+            if (t.status == TaskStatus::Paused) {
+                t.status = TaskStatus::Pending;
+            }
+        }
+
         bool hasPending = false;
         for (const auto& t : m_tasks) {
             if (t.status == TaskStatus::Pending || t.status == TaskStatus::Downloading) {
@@ -216,13 +241,11 @@ void QueueManager::start() {
     }
 
     if (m_isRunning.load()) {
-        m_isPaused.store(false);
         m_cv.notify_all();
         return;
     }
 
     m_stopRequested.store(false);
-    m_isPaused.store(false);
     m_isRunning.store(true);
     if (m_workerThread.joinable()) {
         m_workerThread.join();
@@ -232,11 +255,14 @@ void QueueManager::start() {
 
 void QueueManager::pause() {
     m_isPaused.store(true);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_currentCancellationToken) {
+        m_currentCancellationToken->store(true);
+    }
 }
 
 void QueueManager::resume() {
-    m_isPaused.store(false);
-    m_cv.notify_one();
+    start();
 }
 
 void QueueManager::stop() {
@@ -443,15 +469,14 @@ void QueueManager::executeTask(QueueTask& task) {
         audioStream.index = task.streamIndex;
         audioStream.codec = task.streamCodec;
         audioStream.language = task.streamLanguage;
+        audioStream.bitRate = task.streamBitrate;
 
-        std::string directAudioUrl = m_client.buildDirectAudioStreamUrl(task.itemId, source, audioStream);
-        std::string fallbackVideoUrl = m_client.buildDirectVideoUrl(task.itemId, source);
-
-        result = AudioExtractor::extractAudioStream(
-            directAudioUrl,
-            fallbackVideoUrl,
+        result = m_downloader.downloadAudio(
+            task.itemId,
+            source,
             audioStream,
             task.outputPath,
+            task.expectedSize,
             task.durationSeconds,
             progressCb,
             m_currentCancellationToken
@@ -477,6 +502,9 @@ void QueueManager::executeTask(QueueTask& task) {
         if (m_onTaskCompleted) {
             m_onTaskCompleted(task, result);
         }
+    } else if (m_isPaused.load()) {
+        task.status = TaskStatus::Paused;
+        task.error.clear();
     } else if (result.error == "Operation cancelled" || (m_currentCancellationToken && m_currentCancellationToken->load())) {
         task.status = TaskStatus::Cancelled;
         task.error = "Cancelled";
