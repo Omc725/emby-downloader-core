@@ -43,8 +43,13 @@ struct ProgressInfo {
 
 using ProgressCallback = std::function<bool(const ProgressInfo&)>;
 using CancellationToken = std::shared_ptr<std::atomic<bool>>;
+using PauseToken = std::shared_ptr<std::atomic<bool>>;
 
 inline CancellationToken makeCancellationToken() {
+    return std::make_shared<std::atomic<bool>>(false);
+}
+
+inline PauseToken makePauseToken() {
     return std::make_shared<std::atomic<bool>>(false);
 }
 

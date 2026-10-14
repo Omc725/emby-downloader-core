@@ -217,9 +217,16 @@ void QueueManager::start() {
     m_isPaused.store(false);
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_currentPauseToken) {
+            m_currentPauseToken->store(false);
+        }
         for (auto& t : m_tasks) {
             if (t.status == TaskStatus::Paused) {
-                t.status = TaskStatus::Pending;
+                if (t.id == m_currentTaskId) {
+                    t.status = TaskStatus::Downloading;
+                } else {
+                    t.status = TaskStatus::Pending;
+                }
             }
         }
 
@@ -256,18 +263,66 @@ void QueueManager::start() {
 void QueueManager::pause() {
     m_isPaused.store(true);
     std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_currentCancellationToken) {
-        m_currentCancellationToken->store(true);
+    if (m_currentPauseToken) {
+        m_currentPauseToken->store(true);
     }
+    for (auto& t : m_tasks) {
+        if (t.id == m_currentTaskId) {
+            t.status = TaskStatus::Paused;
+            if (m_onTaskProgress) {
+                m_onTaskProgress(t, t.progress);
+            }
+        }
+    }
+    saveToFile();
 }
 
 void QueueManager::resume() {
     start();
 }
 
+void QueueManager::pauseTask(const std::string& taskId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& t : m_tasks) {
+        if (t.id == taskId) {
+            t.status = TaskStatus::Paused;
+            if (t.id == m_currentTaskId && m_currentPauseToken) {
+                m_currentPauseToken->store(true);
+            }
+            if (m_onTaskProgress) {
+                m_onTaskProgress(t, t.progress);
+            }
+            break;
+        }
+    }
+    saveToFile();
+}
+
+void QueueManager::resumeTask(const std::string& taskId) {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& t : m_tasks) {
+            if (t.id == taskId) {
+                if (t.id == m_currentTaskId && m_currentPauseToken) {
+                    t.status = TaskStatus::Downloading;
+                    m_currentPauseToken->store(false);
+                } else {
+                    t.status = TaskStatus::Pending;
+                }
+                break;
+            }
+        }
+    }
+    saveToFile();
+    start();
+}
+
 void QueueManager::stop() {
     m_stopRequested.store(true);
     m_isPaused.store(false);
+    if (m_currentPauseToken) {
+        m_currentPauseToken->store(false);
+    }
     if (m_currentCancellationToken) {
         m_currentCancellationToken->store(true);
     }
@@ -281,6 +336,9 @@ void QueueManager::stop() {
 
 void QueueManager::cancelCurrentTask() {
     std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_currentPauseToken) {
+        m_currentPauseToken->store(false);
+    }
     if (m_currentCancellationToken) {
         m_currentCancellationToken->store(true);
     }
@@ -290,13 +348,19 @@ void QueueManager::cancelTask(const std::string& taskId) {
     std::lock_guard<std::mutex> lock(m_mutex);
     for (auto& t : m_tasks) {
         if (t.id == taskId) {
-            if (t.id == m_currentTaskId && m_currentCancellationToken) {
-                m_currentCancellationToken->store(true);
+            if (t.id == m_currentTaskId) {
+                if (m_currentPauseToken) {
+                    m_currentPauseToken->store(false);
+                }
+                if (m_currentCancellationToken) {
+                    m_currentCancellationToken->store(true);
+                }
             }
             t.status = TaskStatus::Cancelled;
             break;
         }
     }
+    saveToFile();
 }
 
 void QueueManager::retryTask(const std::string& taskId) {
@@ -320,6 +384,58 @@ void QueueManager::retryAllFailed() {
         }
     }
     m_cv.notify_one();
+}
+
+bool QueueManager::deleteTaskFiles(const std::string& taskId, bool deletePartOnly) {
+    std::string outputPath;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& t : m_tasks) {
+            if (t.id == taskId) {
+                outputPath = t.outputPath;
+                if (t.id == m_currentTaskId) {
+                    if (m_currentPauseToken) m_currentPauseToken->store(false);
+                    if (m_currentCancellationToken) m_currentCancellationToken->store(true);
+                }
+                break;
+            }
+        }
+    }
+
+    if (outputPath.empty()) return false;
+
+    std::error_code ec;
+    std::string partPath = outputPath + ".part";
+    if (fs::exists(partPath, ec)) {
+        fs::remove(partPath, ec);
+    }
+    if (!deletePartOnly && fs::exists(outputPath, ec)) {
+        fs::remove(outputPath, ec);
+    }
+    return true;
+}
+
+std::string QueueManager::getTaskDownloadUrl(const std::string& taskId) const {
+    QueueTask task = getTask(taskId);
+    if (task.id.empty()) return "";
+
+    if (task.type == TaskType::Video) {
+        MediaSource source;
+        source.id = task.sourceId;
+        source.container = task.container;
+        return m_client.buildDirectVideoUrl(task.itemId, source);
+    } else if (task.type == TaskType::Audio) {
+        MediaSource source;
+        source.id = task.sourceId;
+        source.container = task.container;
+        StreamInfo audioStream;
+        audioStream.index = task.streamIndex;
+        audioStream.codec = task.streamCodec;
+        return m_client.buildDirectAudioStreamUrl(task.itemId, source, audioStream);
+    } else if (task.type == TaskType::Subtitle) {
+        return m_client.getSubtitleUrl(task.itemId, task.sourceId, task.streamIndex, task.streamCodec);
+    }
+    return "";
 }
 
 bool QueueManager::loadFromFile(const std::string& filePath) {
@@ -389,6 +505,7 @@ void QueueManager::workerThreadFunc() {
                     hasTask = true;
                     m_currentTaskId = t.id;
                     m_currentCancellationToken = makeCancellationToken();
+                    m_currentPauseToken = makePauseToken();
                     break;
                 }
             }
@@ -405,6 +522,7 @@ void QueueManager::workerThreadFunc() {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_currentTaskId.clear();
                 m_currentCancellationToken = nullptr;
+                m_currentPauseToken = nullptr;
                 for (auto& t : m_tasks) {
                     if (t.id == activeTask.id) {
                         t.status = activeTask.status;
@@ -458,7 +576,8 @@ void QueueManager::executeTask(QueueTask& task) {
             task.outputPath,
             task.expectedSize,
             progressCb,
-            m_currentCancellationToken
+            m_currentCancellationToken,
+            m_currentPauseToken
         );
     } else if (task.type == TaskType::Audio) {
         MediaSource source;
@@ -479,7 +598,8 @@ void QueueManager::executeTask(QueueTask& task) {
             task.expectedSize,
             task.durationSeconds,
             progressCb,
-            m_currentCancellationToken
+            m_currentCancellationToken,
+            m_currentPauseToken
         );
     } else if (task.type == TaskType::Subtitle) {
         StreamInfo subStream;
@@ -502,7 +622,7 @@ void QueueManager::executeTask(QueueTask& task) {
         if (m_onTaskCompleted) {
             m_onTaskCompleted(task, result);
         }
-    } else if (m_isPaused.load()) {
+    } else if (m_isPaused.load() || (m_currentPauseToken && m_currentPauseToken->load())) {
         task.status = TaskStatus::Paused;
         task.error.clear();
     } else if (result.error == "Operation cancelled" || (m_currentCancellationToken && m_currentCancellationToken->load())) {

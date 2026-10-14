@@ -40,11 +40,16 @@ public:
     void start();
     void pause();
     void resume();
+    void pauseTask(const std::string& taskId);
+    void resumeTask(const std::string& taskId);
     void stop();
     void cancelCurrentTask();
     void cancelTask(const std::string& taskId);
     void retryTask(const std::string& taskId);
     void retryAllFailed();
+
+    bool deleteTaskFiles(const std::string& taskId, bool deletePartOnly = false);
+    std::string getTaskDownloadUrl(const std::string& taskId) const;
 
     bool loadFromFile(const std::string& filePath = "");
     bool saveToFile(const std::string& filePath = "") const;
@@ -74,6 +79,7 @@ private:
     std::atomic<bool> m_isRunning{false};
 
     CancellationToken m_currentCancellationToken;
+    PauseToken m_currentPauseToken;
     std::string m_currentTaskId;
 
     TaskCallback m_onTaskAdded;

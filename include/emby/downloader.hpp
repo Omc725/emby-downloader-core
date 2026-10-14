@@ -18,7 +18,8 @@ public:
         const std::string& outputPath,
         uint64_t expectedSize = 0,
         ProgressCallback progressCb = nullptr,
-        CancellationToken cancellationToken = nullptr
+        CancellationToken cancellationToken = nullptr,
+        PauseToken pauseToken = nullptr
     );
 
     DownloadResult downloadAudio(
@@ -29,7 +30,8 @@ public:
         uint64_t expectedSize = 0,
         double durationSeconds = 0.0,
         ProgressCallback progressCb = nullptr,
-        CancellationToken cancellationToken = nullptr
+        CancellationToken cancellationToken = nullptr,
+        PauseToken pauseToken = nullptr
     );
 
     DownloadResult downloadSubtitle(
@@ -47,6 +49,7 @@ public:
         uint64_t expectedSize = 0,
         ProgressCallback progressCb = nullptr,
         CancellationToken cancellationToken = nullptr,
+        PauseToken pauseToken = nullptr,
         int maxRetries = 5
     );
 

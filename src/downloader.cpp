@@ -28,6 +28,7 @@ struct CurlDownloadContext {
     std::chrono::steady_clock::time_point lastCallbackTime;
     ProgressCallback progressCallback;
     CancellationToken cancellationToken;
+    PauseToken pauseToken;
     bool aborted = false;
     bool checkedRange = false;
     CURL* curlHandle = nullptr;
@@ -62,6 +63,35 @@ static int xferInfoCallback(void* clientp, curl_off_t dltotal, curl_off_t dlnow,
     if (ctx->cancellationToken && ctx->cancellationToken->load()) {
         ctx->aborted = true;
         return 1; // Aborts curl
+    }
+
+    if (ctx->pauseToken && ctx->pauseToken->load()) {
+        uint64_t curBytes = ctx->resumeOffset + static_cast<uint64_t>(dlnow);
+        uint64_t totBytes = (dltotal > 0) ? (ctx->resumeOffset + static_cast<uint64_t>(dltotal)) : ctx->expectedTotal;
+
+        if (ctx->progressCallback) {
+            ProgressInfo pausedInfo;
+            pausedInfo.currentBytes = curBytes;
+            pausedInfo.totalBytes = totBytes;
+            pausedInfo.speedBps = 0.0;
+            if (totBytes > 0) {
+                pausedInfo.percent = std::min(100.0, (static_cast<double>(curBytes) / static_cast<double>(totBytes)) * 100.0);
+            }
+            pausedInfo.remainingSeconds = 0;
+            pausedInfo.statusMessage = "Paused";
+            ctx->progressCallback(pausedInfo);
+        }
+
+        while (ctx->pauseToken && ctx->pauseToken->load()) {
+            if (ctx->cancellationToken && ctx->cancellationToken->load()) {
+                ctx->aborted = true;
+                return 1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        ctx->startTime = std::chrono::steady_clock::now();
+        ctx->lastCallbackTime = ctx->startTime;
     }
 
     if (!ctx->progressCallback) return 0;
@@ -108,6 +138,7 @@ DownloadResult Downloader::downloadFile(
     uint64_t expectedSize,
     ProgressCallback progressCb,
     CancellationToken cancellationToken,
+    PauseToken pauseToken,
     int maxRetries
 ) {
     DownloadResult result;
@@ -169,6 +200,7 @@ DownloadResult Downloader::downloadFile(
         ctx.lastCallbackTime = ctx.startTime;
         ctx.progressCallback = progressCb;
         ctx.cancellationToken = cancellationToken;
+        ctx.pauseToken = pauseToken;
         ctx.aborted = false;
         ctx.checkedRange = false;
         ctx.curlHandle = curl;
@@ -252,12 +284,13 @@ DownloadResult Downloader::downloadVideo(
     const std::string& outputPath,
     uint64_t expectedSize,
     ProgressCallback progressCb,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    PauseToken pauseToken
 ) {
     // Orijinal video dosyasını dönüştürmesiz birebir kopya olarak indir
     std::string downloadUrl = m_client.buildDirectVideoUrl(itemId, source);
     uint64_t targetSize = (expectedSize > 0) ? expectedSize : source.size;
-    return downloadFile(downloadUrl, outputPath, targetSize, progressCb, cancellationToken);
+    return downloadFile(downloadUrl, outputPath, targetSize, progressCb, cancellationToken, pauseToken);
 }
 
 DownloadResult Downloader::downloadAudio(
@@ -268,7 +301,8 @@ DownloadResult Downloader::downloadAudio(
     uint64_t expectedSize,
     double durationSeconds,
     ProgressCallback progressCb,
-    CancellationToken cancellationToken
+    CancellationToken cancellationToken,
+    PauseToken pauseToken
 ) {
     uint64_t targetSize = expectedSize;
     if (targetSize == 0 && audioStream.bitRate > 0 && durationSeconds > 0) {
@@ -281,7 +315,7 @@ DownloadResult Downloader::downloadAudio(
     std::string directUrl = m_client.buildDirectAudioStreamUrl(itemId, source, audioStream);
 
     // İlk deneme: libcurl ile doğrudan ses akışını indir
-    DownloadResult res = downloadFile(directUrl, outputPath, targetSize, progressCb, cancellationToken, 2);
+    DownloadResult res = downloadFile(directUrl, outputPath, targetSize, progressCb, cancellationToken, pauseToken, 2);
     if (res.success || (cancellationToken && cancellationToken->load())) {
         return res;
     }
