@@ -511,7 +511,26 @@ MediaItem EmbyClient::getItem(const std::string& itemId) {
     if (res.isOk()) {
         try {
             nlohmann::json data = nlohmann::json::parse(res.body);
-            return parseJsonToMediaItem(data);
+            MediaItem item = parseJsonToMediaItem(data);
+
+            // Eğer MediaSources boşsa veya tek bir kaynak dönmüşse PlaybackInfo ile ek kaynakları kontrol et
+            if (item.sources.empty() || item.sources.size() <= 1) {
+                std::string pUrl = m_serverUrl + m_prefix + "/Items/" + itemId + "/PlaybackInfo?UserId=" + m_userId + "&api_key=" + Platform::urlEncode(m_token);
+                HttpResponse pRes = httpPostJson(pUrl, "{}", getHeaders());
+                if (pRes.isOk()) {
+                    nlohmann::json pData = nlohmann::json::parse(pRes.body);
+                    if (pData.contains("MediaSources") && pData["MediaSources"].is_array()) {
+                        nlohmann::json wrapper = data;
+                        wrapper["MediaSources"] = pData["MediaSources"];
+                        MediaItem playItem = parseJsonToMediaItem(wrapper);
+                        if (playItem.sources.size() > item.sources.size()) {
+                            item.sources = std::move(playItem.sources);
+                        }
+                    }
+                }
+            }
+
+            return item;
         } catch (...) {}
     }
     return MediaItem();
