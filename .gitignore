@@ -1,0 +1,13 @@
+build/
+bin/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+headless_demo
+*.part
+downloads/
+.vscode/
+.idea/
+*.log
