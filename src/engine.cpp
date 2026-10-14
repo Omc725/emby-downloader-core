@@ -66,10 +66,12 @@ EmbyEngine::EmbyEngine(const std::string& configFilePath)
 
     m_downloader = std::make_unique<Downloader>(*m_client);
     m_queue = std::make_unique<QueueManager>(*m_client);
+    m_queue->loadFromFile();
 }
 
 EmbyEngine::~EmbyEngine() {
     if (m_queue) {
+        m_queue->saveToFile();
         m_queue->stop();
     }
 }
@@ -96,6 +98,7 @@ bool EmbyEngine::loadProfile(const std::string& profileId) {
     m_client->setCredentials(prof.userId, prof.token);
     m_downloader = std::make_unique<Downloader>(*m_client);
     m_queue = std::make_unique<QueueManager>(*m_client);
+    m_queue->loadFromFile();
     return true;
 }
 

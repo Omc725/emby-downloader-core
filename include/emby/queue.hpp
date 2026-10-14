@@ -42,6 +42,8 @@ public:
     void stop();
     void cancelCurrentTask();
     void cancelTask(const std::string& taskId);
+    void retryTask(const std::string& taskId);
+    void retryAllFailed();
 
     bool loadFromFile(const std::string& filePath = "");
     bool saveToFile(const std::string& filePath = "") const;

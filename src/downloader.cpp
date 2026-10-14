@@ -225,12 +225,8 @@ DownloadResult Downloader::downloadVideo(
     ProgressCallback progressCb,
     CancellationToken cancellationToken
 ) {
+    // Orijinal video dosyasını dönüştürmesiz birebir kopya olarak indir
     std::string downloadUrl = m_client.buildDirectVideoUrl(itemId, source);
-
-    if (m_client.checkOfficialDownloadAvailable(itemId)) {
-        downloadUrl = m_client.getOfficialDownloadUrl(itemId);
-    }
-
     uint64_t targetSize = (expectedSize > 0) ? expectedSize : source.size;
     return downloadFile(downloadUrl, outputPath, targetSize, progressCb, cancellationToken);
 }

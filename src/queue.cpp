@@ -99,56 +99,74 @@ std::string QueueManager::getDefaultQueueFilePath() {
 }
 
 std::string QueueManager::addTask(const QueueTask& task) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    QueueTask newTask = task;
-    if (newTask.id.empty()) {
-        newTask.id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
-    }
-    newTask.status = TaskStatus::Pending;
-    m_tasks.push_back(newTask);
+    std::string newId;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        QueueTask newTask = task;
+        if (newTask.id.empty()) {
+            newTask.id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count());
+        }
+        newTask.status = TaskStatus::Pending;
+        m_tasks.push_back(newTask);
+        newId = newTask.id;
 
-    if (m_onTaskAdded) {
-        m_onTaskAdded(newTask);
+        if (m_onTaskAdded) {
+            m_onTaskAdded(newTask);
+        }
+        m_cv.notify_one();
     }
-    m_cv.notify_one();
-    return newTask.id;
+    saveToFile();
+    return newId;
 }
 
 void QueueManager::addTasks(const std::vector<QueueTask>& tasks) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    for (auto task : tasks) {
-        if (task.id.empty()) {
-            task.id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(rand() % 1000);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto task : tasks) {
+            if (task.id.empty()) {
+                task.id = std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + "_" + std::to_string(rand() % 1000);
+            }
+            task.status = TaskStatus::Pending;
+            m_tasks.push_back(task);
+            if (m_onTaskAdded) {
+                m_onTaskAdded(task);
+            }
         }
-        task.status = TaskStatus::Pending;
-        m_tasks.push_back(task);
-        if (m_onTaskAdded) {
-            m_onTaskAdded(task);
-        }
+        m_cv.notify_one();
     }
-    m_cv.notify_one();
+    saveToFile();
 }
 
 bool QueueManager::removeTask(const std::string& taskId) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it) {
-        if (it->id == taskId) {
-            if (it->id == m_currentTaskId && m_currentCancellationToken) {
-                m_currentCancellationToken->store(true);
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto it = m_tasks.begin(); it != m_tasks.end(); ++it) {
+            if (it->id == taskId) {
+                if (it->id == m_currentTaskId && m_currentCancellationToken) {
+                    m_currentCancellationToken->store(true);
+                }
+                m_tasks.erase(it);
+                removed = true;
+                break;
             }
-            m_tasks.erase(it);
-            return true;
         }
     }
-    return false;
+    if (removed) {
+        saveToFile();
+    }
+    return removed;
 }
 
 void QueueManager::clear() {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (m_currentCancellationToken) {
-        m_currentCancellationToken->store(true);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_currentCancellationToken) {
+            m_currentCancellationToken->store(true);
+        }
+        m_tasks.clear();
     }
-    m_tasks.clear();
+    saveToFile();
 }
 
 std::vector<QueueTask> QueueManager::getTasks() const {
@@ -178,15 +196,37 @@ bool QueueManager::isRunning() const {
 }
 
 void QueueManager::start() {
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        bool hasPending = false;
+        for (const auto& t : m_tasks) {
+            if (t.status == TaskStatus::Pending || t.status == TaskStatus::Downloading) {
+                hasPending = true;
+                break;
+            }
+        }
+        if (!hasPending) {
+            for (auto& t : m_tasks) {
+                if (t.status == TaskStatus::Error || t.status == TaskStatus::Cancelled) {
+                    t.status = TaskStatus::Pending;
+                    t.error.clear();
+                }
+            }
+        }
+    }
+
     if (m_isRunning.load()) {
         m_isPaused.store(false);
-        m_cv.notify_one();
+        m_cv.notify_all();
         return;
     }
 
     m_stopRequested.store(false);
     m_isPaused.store(false);
     m_isRunning.store(true);
+    if (m_workerThread.joinable()) {
+        m_workerThread.join();
+    }
     m_workerThread = std::thread(&QueueManager::workerThreadFunc, this);
 }
 
@@ -231,6 +271,29 @@ void QueueManager::cancelTask(const std::string& taskId) {
             break;
         }
     }
+}
+
+void QueueManager::retryTask(const std::string& taskId) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& t : m_tasks) {
+        if (t.id == taskId) {
+            t.status = TaskStatus::Pending;
+            t.error.clear();
+            break;
+        }
+    }
+    m_cv.notify_one();
+}
+
+void QueueManager::retryAllFailed() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    for (auto& t : m_tasks) {
+        if (t.status == TaskStatus::Error || t.status == TaskStatus::Cancelled) {
+            t.status = TaskStatus::Pending;
+            t.error.clear();
+        }
+    }
+    m_cv.notify_one();
 }
 
 bool QueueManager::loadFromFile(const std::string& filePath) {
@@ -325,6 +388,7 @@ void QueueManager::workerThreadFunc() {
                     }
                 }
             }
+            saveToFile();
         } else {
             if (m_onQueueFinished) {
                 m_onQueueFinished();
@@ -339,6 +403,15 @@ void QueueManager::executeTask(QueueTask& task) {
     auto progressCb = [&](const ProgressInfo& info) -> bool {
         if (m_stopRequested.load()) return false;
         task.progress = info;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (auto& t : m_tasks) {
+                if (t.id == task.id) {
+                    t.progress = info;
+                    break;
+                }
+            }
+        }
         if (m_onTaskProgress) {
             m_onTaskProgress(task, info);
         }
